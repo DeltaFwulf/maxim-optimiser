@@ -8,7 +8,6 @@ Rockets are represented by n-stages
 To scan efficiently over the available parameter space, we treat this as a sphere traversal problem. We don't guess the stage masses directly, but 
 a position on an n-sphere of given radius using the 'surface' degrees of freedom. This guess corresponds to a rocket of some total mass with stage masses
 that add to the correct value.
-
 """
 
 import numpy as np
@@ -17,10 +16,7 @@ from scipy.optimize import minimize
 import matplotlib.pyplot as plt
 
 # TODO: estimate a function of propLambda vs propulsion system mass, given the propulsion system type: (solid, liquid, hybrid)
-# TODO: set a default totalMass for each stage
-# TODO: tidy the hell out of function outputs, interfaces are getting messy and duplicated
-# TODO: implement a useful results presentation function (highlight failed solves, etc, subplots of all flight data)
-# TODO: make use of Rocket.addStage() rather than passing a list into the class on __init__()
+# TODO: account for tank residuals, some percentage in each tank
 
 def angs2masses(totalMass:float, angs:list[float]) -> list[float]:
     """
@@ -122,25 +118,22 @@ class Rocket():
 
         self.stages = stages
         self.payload = payload
-        self.canVary = self.getVariableStages()
+        self.canVary, self.freeStages = self.getVariableStages()
 
 
     def deltaV(self):
         # get the delta v contribution by each stage
 
         deltaVs = np.zeros((len(self.stages)), float)
-        stageInitMasses = np.zeros((len(self.stages)), float)
-        stagePropMasses = np.zeros((len(self.stages)), float)
+        initMasses = np.zeros((len(self.stages)), float)
     
         for i in range(0, len(self.stages)):
-            
-            stageInitMasses[i] = self.stages[i].totalMass
-            stagePropMasses[i] = self.stages[i].mPropellant
+            initMasses[i] = self.stages[i].mInit
 
         for i in range(0, len(self.stages)):
 
-            m0 = np.sum(stageInitMasses[i:]) + self.payload
-            mf = m0 - stagePropMasses[i]
+            m0 = np.sum(initMasses[i:]) + self.payload
+            mf = m0 - self.stages[i].mPropellant
             deltaVs[i] = self.stages[i].isp * 9.81 * log(m0/mf)
 
         return deltaVs
@@ -165,17 +158,21 @@ class Rocket():
     
     def getVariableStages(self):
 
-        isVariable = []
-        
-        for stage in self.stages:
-            isVariable.append(stage.canVary)
+        variableStages = []
+        freeStages = []
 
-        return isVariable
+        for i in range(0, len(self.stages)):
+            variableStages.append(self.stages[i].canVary)
+            
+            if self.stages[i].canVary:
+                freeStages.append(i)
+
+        return variableStages, freeStages 
 
     
     def changeStage(self, stageNum:int, newTotalMass:float=None, newIsp:float=None, newPropLambda:float=None, newExtraMass:float=None):
  
-        self.stages[stageNum].calculate(newTotalMass, newIsp, newPropLambda, newExtraMass) # XXX: check that this actually updates the element
+        self.stages[stageNum].calculate(newTotalMass, newIsp, newPropLambda, newExtraMass)
 
     
     def addStage(self, newStage:Stage, num:int):
@@ -196,6 +193,7 @@ class Rocket():
         """
 
         self.stageScores = []
+        totalDeviation = 0
 
         for i in range(0, len(self.stages)):
             
@@ -205,8 +203,6 @@ class Rocket():
             massLimits = stage.constraints.get('mass')
             accLimits = stage.constraints.get('acceleration')
             timeLimits = stage.constraints.get('time')
-
-            totalDeviation = 0
 
             if massLimits is not None: # the number of kilograms the stage is outside of bounds.
                 
@@ -252,15 +248,11 @@ def angs2dv(angs:list[float], rocketMass:float, rocket:Rocket) -> float:
 
     stageMasses = angs2masses(totalMass=freeMass, angs=angs)
 
-    changed = 0
-    for i in range(0, stageMasses.size):
-        if(rocket.canVary[i] == True):
-            rocket.changeStage(stageNum=i, newTotalMass=stageMasses[changed])
-            changed += 1
+    for i in range(0, len(rocket.freeStages)):
+        rocket.changeStage(stageNum=rocket.freeStages[i], newTotalMass=stageMasses[i])
 
     rocket.scoreStages()
 
-    # NOTE: tune these numbers depending on biggest priority
     massMultiplier = 1000
     accMultiplier = 1000
     timeMultiplier = 1000
@@ -291,37 +283,37 @@ def optimise(rocket:Rocket, rocketMass:float) -> Rocket:
     angLims = [-pi/2, pi/2]
     bounds = []
 
-    for i in range(0, len(rocket.canVary)-1):#
+    for i in range(0, len(rocket.freeStages)-1):#
         bounds.append(angLims)
 
     bounds = tuple(bounds)
     
-    x0 = (0.5 * np.ones((len(rocket.stages) - 1), float)).tolist()
-
+    x0 = (0.5 * np.ones((len(rocket.freeStages) - 1), float)).tolist()
+  
     minimize(fun=angs2dv, x0=x0, args=(rocketMass, rocket), method='Nelder-Mead', bounds=bounds, tol=1e-9)
 
     return rocket
 
 
 
-def sweepMass(limits=list[float]):
+def sweepMass(rocket:Rocket, limits=list[float]):
     """Visualise how vehicle performance changes by varying different properties of the launch vehicle"""
 
     # let's sweep the vehicle total mass:
     rocketMass = np.linspace(limits[0], limits[1], 50)
+    currentMass = 10000 # use this to see how far from optimum a certain design is, given its current mass
 
-    # define stages
-    stage1 = Stage(totalMass=0, isp=310, massFlow=20, propLambda=0.85, extraMass=50, canVary=True, constraints={})
-    stage2 = Stage(totalMass=0, isp=340, massFlow=10, propLambda=0.8, extraMass=20, canVary=True, constraints={})
-    stage3 = Stage(totalMass=0, isp=280, massFlow=1, propLambda=0.75, extraMass=5, canVary=True, constraints={'acceleration':[0, 60]})
+    # Moonlight ICBM: when playing KSP, propLambda is just the tank utilisation, everything else is either extra mass or payload
+    # stage1 = Stage(totalMass=0, isp=215, massFlow=53.9, propLambda=0.918, extraMass=574, canVary=True, constraints={'time':[0,103]}) # MOONLIGHT BOOSTER
+    # stage2 = Stage(totalMass=0, isp=236, massFlow=8.64, propLambda=0.785, extraMass=76, canVary=True, constraints={'time':[0,60]}) # MOONLIGHT 2nd Stage
+    # stage3 = Stage(totalMass=0, isp=228, massFlow=6.15, propLambda=0.764, extraMass=25, canVary=True, constraints={'time':[0,50]}) # MOTH M
 
-    stages = [stage1, stage2, stage3]
-    rocket = Rocket(stages=stages, payload=100)
-    
-    dv = np.zeros((rocketMass.size, len(stages)), float)
-    maxAccelerations = np.zeros((rocketMass.size, len(stages)), float)
-    stageMasses = np.zeros((rocketMass.size, len(stages)), float)
-    stageTimes = np.zeros((rocketMass.size, len(stages)), float)
+
+    dv = np.zeros((rocketMass.size, len(rocket.stages)), float)
+    maxAccelerations = np.zeros((rocketMass.size, len(rocket.stages)), float)
+    stageMasses = np.zeros((rocketMass.size, len(rocket.stages)), float)
+    stageTimes = np.zeros((rocketMass.size, len(rocket.stages)), float)
+    propMasses = np.zeros((rocketMass.size, len(rocket.stages)), float)
 
     for i in range(0, rocketMass.size):
         
@@ -330,30 +322,30 @@ def sweepMass(limits=list[float]):
         for j in range(0, len(optimRocket.stages)):
             stageMasses[i,j] = optimRocket.stages[j].mInit
             stageTimes[i,j] = optimRocket.stages[j].burnTime
+            propMasses[i,j] = optimRocket.stages[j].mPropellant
 
         dv[i,:] = optimRocket.deltaV()
         maxAccelerations[i,:] = optimRocket.calcAccelerations()
 
-    # delta-v (total)
-    # delta-v (by stage)
-    # mass by stage
-    # acceleration by stage
-    # burn time by stage
+    currentMassX = [currentMass, currentMass]
+    currentMassY = [np.max(np.sum(dv, axis=1)), np.min(np.sum(dv, axis=1))]
 
     fig, axs = plt.subplots(2, 3)
 
     axs[0,0].plot(rocketMass, np.sum(dv, axis=1), '-')
+    axs[0,0].plot(currentMassX, currentMassY, '--r')
     axs[0,0].set_xlabel('rocket mass, kg')
     axs[0,0].set_ylabel('optimum Δv, m/s')
     axs[0,0].grid()
 
     stageKey = []
 
-    for i in range(0, len(stages)):
+    for i in range(0, len(rocket.stages)):
         axs[1,0].plot(rocketMass, dv[:,i])
         axs[0,1].plot(rocketMass, stageMasses[:,i])
         axs[1,1].plot(rocketMass, maxAccelerations[:,i])
         axs[0,2].plot(rocketMass, stageTimes[:,i])
+        axs[1,2].plot(rocketMass, propMasses[:,i])
         stageKey.append('stage' + str(i + 1))
 
     axs[1,0].set_xlabel('rocket mass, kg')
@@ -365,7 +357,7 @@ def sweepMass(limits=list[float]):
     axs[0,1].set_ylabel('stage mass, kg')
     axs[0,1].legend(stageKey)
     axs[0,1].grid()
-
+    
     axs[1,1].set_xlabel('rocket mass, kg')
     axs[1,1].set_ylabel('max acceleration, m/s^2')
     axs[1,1].legend(stageKey)
@@ -375,29 +367,22 @@ def sweepMass(limits=list[float]):
     axs[0,2].set_ylabel('stage burn time, s')
     axs[0,2].legend(stageKey)
     axs[0,2].grid()
-    
+
+    axs[1,2].set_xlabel('rocket mass, kg')
+    axs[1,2].set_ylabel('propellant mass, kg')
+    axs[1,2].legend(stageKey)
+    axs[1,2].grid()
+
     plt.show()
 
 
 
-def targetDv(dvTarget:float):
+def targetDv(rocket:Rocket, dvTarget:float, massLims:list):
     """Calculate the lightest rocket that could achieve the target ideal delta-v"""
 
-    # define the stage limits, etc.
-    stage1 = Stage(totalMass=0, isp=310, massFlow=20, propLambda=0.85, extraMass=50, canVary=True, constraints={})
-    stage2 = Stage(totalMass=0, isp=340, massFlow=10, propLambda=0.8, extraMass=20, canVary=True, constraints={})
-    stage3 = Stage(totalMass=0, isp=280, massFlow=3, propLambda=0.75, extraMass=5, canVary=True, constraints={'mass':[0, 300], 'acceleration':[20, 100]})
-
-    rocket = Rocket(stages=[stage1, stage2, stage3], payload=100)
-
     # method 1: sweep over mass range, get crossing points of function, then solve using minimize or shooting method over this small range
-    baseMass = rocket.payload
-    for stage in rocket.stages:
-        baseMass += stage.extraMass
-
-    dm = baseMass / 10 # some value tied to the vehicle mass
-    
-    rocketMass = np.arange(2 * baseMass, 100 * baseMass, dm)
+    dm = 50
+    rocketMass = np.arange(massLims[0], massLims[1], dm)
     dv = [0]
     i = 0
 
@@ -409,6 +394,7 @@ def targetDv(dvTarget:float):
 
     if i == rocketMass.size:
         print("No vehicle within mass range achieved target dv, please adjust settings and try again.")
+        return
       
     else:
         # there is a crossing point: solve for the mass between rocketMass[i-1] and rocketMass[i-2]
@@ -436,6 +422,16 @@ def targetDv(dvTarget:float):
         print(f"final rocket mass: {mass[1]} kg, delta-v: {finalDv} m/s (error = {err[1]})")
         print(f"checks passed: {isValid}")
 
+        # output the stage breakdown for this rocket:
+        for j in range(0, len(rocket.stages)):
+            print(f"Stage {j}:\n=========================================================")
+            print(f"Total Mass:\t\t{'%.3f' % rocket.stages[j].totalMass} kg")
+            print(f"Propellant Mass:\t{'%.3f' % rocket.stages[j].mPropellant} kg")
+            print(f"Final Mass:\t\t{'%.3f' % rocket.stages[j].mFinal} kg")
+            print(f"Required burn time:\t{'%.3f' % rocket.stages[j].burnTime} s")
+            print(f"delta-v:\t\t{'%.3f' % rocket.deltaV()[j]} m/s")
+            print('\n')
+
     fig, ax = plt.subplots()
     ax.plot(rocketMass[:i], dv[:i], '-k')
     ax.set_xlabel('rocket mass, kg')
@@ -445,5 +441,19 @@ def targetDv(dvTarget:float):
 
 
 
-sweepMass(limits=[4000, 10000])
-#targetDv(9500)
+def main():
+
+    # build the rocket:
+    stage1 = Stage(totalMass=4332, isp=290.65, massFlow=50, propLambda=0.917, extraMass=40, canVary=False, constraints={})
+    stage2 = Stage(totalMass=0, isp=340, massFlow=24.662, propLambda=0.9, extraMass=40, canVary=True, constraints={})
+    stage3 = Stage(totalMass=0, isp=340, massFlow=4.932, propLambda=0.9, extraMass=20, canVary=True, constraints={})
+
+    stages = [stage1, stage2, stage3]
+    rocket = Rocket(stages=stages, payload=250)
+
+    # sweepMass(rocket=rocket, limits=[6000, 10000])
+    targetDv(rocket=rocket, dvTarget=8500, massLims=[5000, 50000])
+    #optimise(rocket=rocket, rocketMass=8500)
+    
+
+main()
