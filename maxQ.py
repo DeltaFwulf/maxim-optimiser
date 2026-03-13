@@ -33,7 +33,16 @@ def main():
     rocketB.tTimes = [0.0, tf]
     rocketB.name = '80 percent throttle'
 
-    rockets = [rocketA, rocketB]
+    stages = []
+    stages.append(Stage(mTotal=1000, propFrac=0.8, isp=250, mDot=30, canVary=False, cdA=0.2))
+    stages.append(Stage(mTotal=500, propFrac=0.7, isp=300, mDot=2, canVary=False, cdA=0.1))
+    rocketC = Rocket(stages)
+    rocketC.tVals = [1.0, 1.0, 0.5, 0.5, 1.0, 1.0]
+    rocketC.tTimes = [0.0, 12.0, 13.0, 21.0, 23.0, tf]
+    rocketC.name = 'short damping'
+
+
+    rockets = [rocketA, rocketB, rocketC]
 
     z0 = 0.0
     v0 = 0.0
@@ -58,8 +67,8 @@ def main():
         ax[2].plot(t, q, '-', label=roc.name)
         
     ax[0].legend()
-    ax[1].legend()
-    ax[2].legend()
+    #ax[1].legend(loc='lower right')
+    #ax[2].legend()
     plt.show()
 
 

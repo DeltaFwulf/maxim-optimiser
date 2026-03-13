@@ -1,5 +1,5 @@
 import numpy as np
-from math import cos, pi, sqrt
+from math import cos, pi, sqrt, log10
 from scipy.optimize import minimize
 
 from rocket import Rocket
@@ -78,13 +78,23 @@ def optimiseStages(rocket:Rocket, mRocket:float, mPayload:float) -> Rocket:
     """Calculates a rocket with a given total mass that delivers the highest possible delta-v according to design constraints."""
 
     # can this rocket be optimised? if not, return the same rocket immediately
-    if len(rocket.freeStages) <= 1:
+    if len(rocket.freeStages) ==0:
+        return rocket
+    
+    elif len(rocket.freeStages) == 1:
+
+        stg = rocket.stages[rocket.freeStages[0]]
+
+        # update the free stage to satisfy the total mass constraint:
+        fixedMass = rocket.getMass() - stg.mtot
+        freeMass = max(0.0, mRocket - fixedMass)
+
+        stg.update({'total_mass':freeMass})
         return rocket
 
     # set input limits:
     angLims = [-pi/2, pi/2]
     bounds = []
-
 
     for i in range(0, len(rocket.freeStages)-1):#
         bounds.append(angLims)
@@ -117,10 +127,10 @@ def setMass(rocketIn:Rocket, rocketMass:float, payload:float) -> Rocket:
 
 
 
-def lightestRocket(rocketIn:Rocket, payload:float, dv:float) -> Rocket:
+def lightestRocket(rocketIn:Rocket, mBounds:list['float'], payload:float, dv:float) -> Rocket:
     """Optimises the lightest possible rocket to carry a given payload with specified dv requirement"""
 
-    mArr = np.logspace(base=10, start=2, stop=5, num=30, dtype=float)
+    mArr = np.logspace(base=10, start=log10(mBounds[0]), stop=log10(mBounds[1]), num=30, dtype=float)
     
     for i in range(mArr.size):
 
@@ -130,6 +140,9 @@ def lightestRocket(rocketIn:Rocket, payload:float, dv:float) -> Rocket:
 
         if err > 0:
             break
+
+    if i == mArr.size - 1 and err < 0:
+        return None
 
     m0 = mArr[i-1]
     m1 = mArr[i]
@@ -146,6 +159,9 @@ def lightestRocket(rocketIn:Rocket, payload:float, dv:float) -> Rocket:
 
         err0 = np.sum(rocket0.getDv(payload)) - dv
         err1 = np.sum(rocket1.getDv(payload)) - dv
+
+        if err0 == err1:
+            print("poopoo")
 
         m2 = m0 + (err0 / (err0 - err1))*(m1 - m0)
 
